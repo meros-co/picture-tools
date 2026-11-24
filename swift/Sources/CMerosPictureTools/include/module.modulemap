@@ -1,0 +1,4 @@
+module CMerosPictureTools {
+    header "meros_picture_tools.h"
+    export *
+}
