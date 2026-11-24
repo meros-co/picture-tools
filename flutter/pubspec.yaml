@@ -1,0 +1,22 @@
+name: meros_picture_tools
+description: Picture tools for Flutter video apps - a LUT, false color, zebras and focus peaking as an image filter shader, and scope views - from the picture-tools repo's generated shader.
+version: 0.1.0
+repository: https://github.com/meros-co/picture-tools
+publish_to: none
+
+environment:
+  sdk: ^3.12.2
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  shaders:
+    - shaders/picture_tools.frag
