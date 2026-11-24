@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/picture-tools", "crates/picture-tools-gen"]
+default-members = ["crates/picture-tools"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/meros-co/picture-tools"
+rust-version = "1.89"

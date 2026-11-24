@@ -1,0 +1,11 @@
+[package]
+name = "picture-tools-gen"
+version = "0.1.0"
+description = "Writes the generated shaders and uniforms.json"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+meros-picture-tools = { path = "../picture-tools", features = ["codegen"] }
