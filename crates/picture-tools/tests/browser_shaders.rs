@@ -318,7 +318,14 @@ fn shaders_match_the_cpu_reference_and_the_controller() {
     let page = dir.join("harness.html");
     std::fs::write(&page, HARNESS.replace("DATA", &data.to_string())).unwrap();
     let url = format!("file:///{}", page.to_string_lossy().replace('\\', "/").trim_start_matches('/'));
-    let out = Command::new(&browser)
+    let mut command = Command::new(&browser);
+    // Ubuntu 23.10 and later (GitHub's runners among them) block the
+    // unprivileged user namespaces Chrome's sandbox needs; the page is our
+    // own, so it runs without one there.
+    if cfg!(target_os = "linux") {
+        command.arg("--no-sandbox");
+    }
+    let out = command
         .args([
             "--headless=new",
             "--disable-gpu",
