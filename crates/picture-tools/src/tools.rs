@@ -157,6 +157,14 @@ pub struct PictureToolsParams {
     pub peaking: Option<Peaking>,
 }
 
+impl PictureToolsParams {
+    /// True when the tools change nothing: no LUT, false color, zebras or
+    /// peaking (a renderer can skip the pass).
+    pub fn is_identity(&self) -> bool {
+        !self.lut && self.false_color.is_none() && self.zebras.is_empty() && self.peaking.is_none_or(|p| p.threshold <= 0.0)
+    }
+}
+
 /// A uniform's GLSL type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -567,6 +575,13 @@ mod tests {
         assert_eq!(get("u_zebra_style"), vec![1.0]);
         assert_eq!(get("u_zebra_speed"), vec![40.0]);
         assert_eq!(get("u_fc_rgb").len(), 24);
+    }
+
+    #[test]
+    fn identity_is_nothing_on() {
+        assert!(PictureToolsParams::default().is_identity());
+        assert!(!PictureToolsParams { lut: true, ..Default::default() }.is_identity());
+        assert!(!PictureToolsParams { zebras: vec![Zebra { level: 0.9, band: None }], ..Default::default() }.is_identity());
     }
 
     #[test]
