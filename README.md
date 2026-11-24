@@ -104,8 +104,11 @@ ScopeView(ScopeFrame(ScopeKind.waveform, 256, 256, bytes))
 ```
 
 `PictureToolsFilter` is an image-filter shader, which needs Flutter's
-Impeller renderer: the default on Android, iOS and macOS; on Windows and
-Linux the app turns Impeller on. `PictureToolsParams.fromJson` reads the
+Impeller renderer: the default on Android, iOS and macOS. Windows and Linux
+release builds can't turn Impeller on, so there the filter passes its child
+through and the tools run in Rust instead: `tools::apply_cpu` is split
+across cores and fast enough for video (about 10 ms for 1080p with every
+tool on), and a video app applies it to the frames its texture shows. `PictureToolsParams.fromJson` reads the
 Rust crate's JSON form.
 
 ## Swift

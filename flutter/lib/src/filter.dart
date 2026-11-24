@@ -84,9 +84,10 @@ class PictureToolsProgram {
 /// any widget) as an image filter.
 ///
 /// Image-filter shaders need Flutter's Impeller renderer: the default on
-/// Android, iOS and macOS; on Windows and Linux, the app enables Impeller.
-/// Where it's not available ([ui.ImageFilter.isShaderFilterSupported]
-/// false), the child is shown as it is.
+/// Android, iOS and macOS. Windows and Linux release builds don't have it
+/// ([ui.ImageFilter.isShaderFilterSupported] false); there the child is
+/// shown as it is, and the app applies the tools to its frames in Rust
+/// (`tools::apply_cpu`) before they reach the texture.
 class PictureToolsFilter extends StatefulWidget {
   const PictureToolsFilter({
     super.key,
