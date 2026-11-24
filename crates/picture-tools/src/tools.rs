@@ -323,6 +323,10 @@ fn glsl_mod(x: f32, y: f32) -> f32 {
 /// What the shaders compute, on the CPU: applies `p` to a packed RGBA
 /// frame in place (alpha kept), sampling the frame at its own pixels. With
 /// `p.lut` set and `lut` given, the LUT is applied by trilinear lookup.
+///
+/// Fast enough for video where the GPU path isn't available (a desktop
+/// renderer without shader image filters): large frames are split across
+/// the CPU's cores, each pixel computed exactly as on one thread.
 pub fn apply_cpu(p: &PictureToolsParams, lut: Option<&Lut3d>, rgba: &mut [u8], w: u32, h: u32, time_s: f32) {
     let (w, h) = (w as usize, h as usize);
     if rgba.len() < w * h * 4 || w == 0 || h == 0 {
@@ -331,72 +335,125 @@ pub fn apply_cpu(p: &PictureToolsParams, lut: Option<&Lut3d>, rgba: &mut [u8], w
     let lut = if p.lut { lut } else { None };
     let weights = p.luma.weights();
     let limited = p.range == Range::Limited;
-    // The picture (LUT applied) at every pixel, then its luma.
-    let picture: Vec<[f32; 3]> = rgba
-        .chunks_exact(4)
-        .take(w * h)
-        .map(|px| {
-            let c = [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0];
-            lut.map_or(c, |l| l.apply(c))
-        })
-        .collect();
     let luma_of = |c: [f32; 3]| {
         let c = if limited { c.map(|v| (v - 16.0 / 255.0) * (255.0 / 219.0)) } else { c };
         c[0] * weights[0] + c[1] * weights[1] + c[2] * weights[2]
     };
-    let luma: Vec<f32> = picture.iter().map(|&c| luma_of(c)).collect();
+    let threads = threads_for(w * h);
+    let band_rows = h.div_ceil(threads);
+    // The picture (LUT applied) at every pixel, and its luma.
+    let mut picture = vec![[0f32; 3]; w * h];
+    let mut luma = vec![0f32; w * h];
+    let prepare = |pic: &mut [[f32; 3]], lum: &mut [f32], src: &[u8]| {
+        for ((c, l), px) in pic.iter_mut().zip(lum.iter_mut()).zip(src.chunks_exact(4)) {
+            let v = [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0];
+            *c = lut.map_or(v, |t| t.apply(v));
+            *l = luma_of(*c);
+        }
+    };
+    if threads == 1 {
+        prepare(&mut picture, &mut luma, &rgba[..w * h * 4]);
+    } else {
+        std::thread::scope(|scope| {
+            for ((pic, lum), src) in picture
+                .chunks_mut(band_rows * w)
+                .zip(luma.chunks_mut(band_rows * w))
+                .zip(rgba.chunks(band_rows * w * 4))
+            {
+                scope.spawn(move || prepare(pic, lum, src));
+            }
+        });
+    }
     let u = uniforms_for(p, [w as f32, h as f32], lut.map_or(33, |l| l.size), time_s);
-    let get = |name: &str| &u.iter().find(|x| x.name == name).unwrap().value;
-    let (stripe, speed, style) = (get("u_zebra_stripe")[0], get("u_zebra_speed")[0], get("u_zebra_style")[0]);
+    let get = |name: &str| u.iter().find(|x| x.name == name).unwrap().value[0];
+    let (stripe, speed, style) = (get("u_zebra_stripe"), get("u_zebra_speed"), get("u_zebra_style"));
+    let (picture, luma) = (&picture, &luma);
+    let shade = |y0: usize, rows: &mut [u8]| {
+        for (r, row) in rows.chunks_mut(w * 4).enumerate() {
+            shade_row(p, picture, luma, row, y0 + r, w, h, time_s, stripe, speed, style);
+        }
+    };
+    if threads == 1 {
+        shade(0, &mut rgba[..w * h * 4]);
+    } else {
+        std::thread::scope(|scope| {
+            for (band, rows) in rgba[..w * h * 4].chunks_mut(band_rows * w * 4).enumerate() {
+                scope.spawn(move || shade(band * band_rows, rows));
+            }
+        });
+    }
+}
+
+/// Threads for a frame of `pixels`: one for small frames.
+fn threads_for(pixels: usize) -> usize {
+    if pixels < 1 << 16 || cfg!(target_family = "wasm") {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8)
+}
+
+/// One output row of [`apply_cpu`].
+#[allow(clippy::too_many_arguments)]
+fn shade_row(
+    p: &PictureToolsParams,
+    picture: &[[f32; 3]],
+    luma: &[f32],
+    row: &mut [u8],
+    y: usize,
+    w: usize,
+    h: usize,
+    time_s: f32,
+    stripe: f32,
+    speed: f32,
+    style: f32,
+) {
     let fc = p.false_color.as_ref();
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let c = picture[i];
-            let l = luma[i];
-            let mut out = c;
-            if let Some(f) = fc {
-                out = match f.bands.iter().take(MAX_BANDS).find(|b| l >= b.lo && l < b.hi) {
-                    Some(b) => b.rgb,
-                    None if f.outside == FalseColorOutside::Grayscale => [l; 3],
-                    None => c,
-                };
+    for x in 0..w {
+        let i = y * w + x;
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        let c = picture[i];
+        let l = luma[i];
+        let mut out = c;
+        if let Some(f) = fc {
+            out = match f.bands.iter().take(MAX_BANDS).find(|b| l >= b.lo && l < b.hi) {
+                Some(b) => b.rgb,
+                None if f.outside == FalseColorOutside::Grayscale => [l; 3],
+                None => c,
+            };
+        }
+        for (k, z) in p.zebras.iter().take(MAX_ZEBRAS).enumerate() {
+            let band = z.band.unwrap_or(0.0);
+            let hit = if band > 0.0 { (l - z.level).abs() <= band } else { l >= z.level };
+            if !hit {
+                continue;
             }
-            for (k, z) in p.zebras.iter().take(MAX_ZEBRAS).enumerate() {
-                let band = z.band.unwrap_or(0.0);
-                let hit = if band > 0.0 { (l - z.level).abs() <= band } else { l >= z.level };
-                if !hit {
-                    continue;
-                }
-                let period = 2.0 * stripe.max(1.0);
-                if style < 0.5 {
-                    let along = if k == 0 { fx + fy } else { fx - fy };
-                    let s = if glsl_mod(along, period) < stripe.max(1.0) { 1.0 } else { 0.0 };
-                    out = mix3(out, [s; 3], if k == 0 { 0.6 } else { 0.5 });
-                } else {
-                    let along = if k == 0 { fx - fy + h as f32 } else { fx + fy };
-                    if glsl_mod(along + time_s * speed, period) < stripe.max(1.0) {
-                        out = [0.06; 3];
-                    }
+            let period = 2.0 * stripe.max(1.0);
+            if style < 0.5 {
+                let along = if k == 0 { fx + fy } else { fx - fy };
+                let s = if glsl_mod(along, period) < stripe.max(1.0) { 1.0 } else { 0.0 };
+                out = mix3(out, [s; 3], if k == 0 { 0.6 } else { 0.5 });
+            } else {
+                let along = if k == 0 { fx - fy + h as f32 } else { fx + fy };
+                if glsl_mod(along + time_s * speed, period) < stripe.max(1.0) {
+                    out = [0.06; 3];
                 }
             }
-            if let Some(pk) = p.peaking.filter(|k| k.threshold > 0.0) {
-                let at = |xx: isize, yy: isize| {
-                    let xx = xx.clamp(0, w as isize - 1) as usize;
-                    let yy = yy.clamp(0, h as isize - 1) as usize;
-                    luma[yy * w + xx]
-                };
-                let (xi, yi) = (x as isize, y as isize);
-                let edge = (4.0 * l - at(xi - 1, yi) - at(xi + 1, yi) - at(xi, yi - 1) - at(xi, yi + 1)).abs();
-                if edge > pk.threshold {
-                    out = pk.color;
-                }
+        }
+        if let Some(pk) = p.peaking.filter(|k| k.threshold > 0.0) {
+            let at = |xx: isize, yy: isize| {
+                let xx = xx.clamp(0, w as isize - 1) as usize;
+                let yy = yy.clamp(0, h as isize - 1) as usize;
+                luma[yy * w + xx]
+            };
+            let (xi, yi) = (x as isize, y as isize);
+            let edge = (4.0 * l - at(xi - 1, yi) - at(xi + 1, yi) - at(xi, yi - 1) - at(xi, yi + 1)).abs();
+            if edge > pk.threshold {
+                out = pk.color;
             }
-            let px = &mut rgba[i * 4..i * 4 + 3];
-            for c in 0..3 {
-                px[c] = (out[c].clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
+        }
+        let px = &mut row[x * 4..x * 4 + 3];
+        for c in 0..3 {
+            px[c] = (out[c].clamp(0.0, 1.0) * 255.0).round() as u8;
         }
     }
 }
@@ -575,6 +632,39 @@ mod tests {
         assert_eq!(get("u_zebra_style"), vec![1.0]);
         assert_eq!(get("u_zebra_speed"), vec![40.0]);
         assert_eq!(get("u_fc_rgb").len(), 24);
+    }
+
+    /// A 1080p frame with every tool on: split across threads it's the
+    /// same as row by row, and quick enough for video.
+    #[test]
+    fn large_frames_are_the_same_on_many_threads_and_quick() {
+        let (w, h) = (1920usize, 1080usize);
+        let frame: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 255 / w) as u8, (i / w % 256) as u8, (i % 97) as u8, 255]).collect();
+        let p = PictureToolsParams {
+            false_color: Some(FalseColor { bands: FALSE_COLOR_CAMERA.to_vec(), outside: FalseColorOutside::Grayscale }),
+            zebras: vec![Zebra { level: 0.9, band: None }, Zebra { level: 0.5, band: Some(0.025) }],
+            peaking: Some(Peaking { threshold: 0.1, color: [1.0, 0.0, 0.0] }),
+            ..Default::default()
+        };
+        let mut fast = frame.clone();
+        let start = std::time::Instant::now();
+        apply_cpu(&p, None, &mut fast, w as u32, h as u32, 0.0);
+        let took = start.elapsed();
+        // Row by row, on one thread.
+        let mut slow = frame.clone();
+        let mut picture = Vec::new();
+        let mut luma = Vec::new();
+        for px in frame.chunks_exact(4) {
+            let c = [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0];
+            picture.push(c);
+            luma.push(c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722);
+        }
+        for (y, row) in slow.chunks_mut(w * 4).enumerate() {
+            shade_row(&p, &picture, &luma, row, y, w, h, 0.0, 8.0, 0.0, 0.0);
+        }
+        assert!(fast == slow);
+        eprintln!("1080p with every tool: {took:?}");
+        assert!(took < std::time::Duration::from_millis(if cfg!(debug_assertions) { 400 } else { 40 }), "{took:?}");
     }
 
     #[test]
