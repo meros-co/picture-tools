@@ -128,6 +128,17 @@ or the crate's static library); the package carries the header.
 `mpt_scope`, `mpt_shader_source` and `mpt_string_free`; see
 `include/meros_picture_tools.h`.
 
+An app whose own Rust library exports these (a dependency with the `capi`
+feature) must write, once in that library's `lib.rs`:
+
+```rust
+extern crate meros_picture_tools;
+```
+
+Rust links a dependency only when the app's code names it, so without this
+line the `mpt_*` functions are left out of the library on any platform where
+the app's code doesn't use the crate. Write it without a `#[cfg]`.
+
 ## Tests
 
 - `cargo test`: LUTs (against a camera app's LUT code, on fixtures),
